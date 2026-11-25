@@ -34,6 +34,12 @@ export const PROVIDERS = {
     model: "meta-llama/llama-3.3-70b-instruct:free",
     keyUrl: "https://openrouter.ai/keys",
   },
+  openai: {
+    label: "OpenAI",
+    baseUrl: "https://api.openai.com/v1",
+    model: "gpt-5-mini",
+    keyUrl: "https://platform.openai.com/api-keys",
+  },
 };
 
 const providerName = env("AI_PROVIDER", "gemini").toLowerCase();

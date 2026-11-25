@@ -85,6 +85,14 @@ async function listModels() {
   const ids = (data?.data ?? []).map((m) => String(m.id).replace(/^models\//, ""));
   const bad = /(image|tts|audio|live|embed|vision|robotics|computer|native|thinking-exp)/i;
   const usable = ids.filter((id) => !bad.test(id));
+  if (config.aiProvider === "openai") {
+    // Faqat matnli chat modellari, arzon "mini" lar birinchi
+    const chat = usable.filter((id) => /^(gpt-|o\d|chatgpt)/.test(id) && !/(realtime|transcribe|tts|search|image|audio|instruct|codex|nano|-pro|\d{4}-\d{2}-\d{2})/.test(id));
+    const order = [/^gpt-5[\d.]*-mini$/, /^gpt-4\.1-mini$/, /^gpt-4o-mini$/, /mini/, /./];
+    const out = [];
+    for (const re of order) for (const id of chat.filter((x) => re.test(x)).sort().reverse()) if (!out.includes(id)) out.push(id);
+    return out;
+  }
   if (config.aiProvider !== "gemini") return usable;
   const order = [/^gemini-flash-latest$/, /^gemini-[\d.]+-flash$/, /^gemini-flash-lite-latest$/, /^gemini-[\d.]+-flash-lite$/, /flash/];
   const out = [];
@@ -132,11 +140,18 @@ async function callModel(model, { persona, history }, timeoutMs) {
   const body = {
     model,
     messages: [{ role: "system", content: `${persona}\n\n${FORMAT_RULES}\n${todayLine()}` }, ...history],
-    max_tokens: 8192,
-    temperature: 0.7,
   };
-  // Gemini "o'ylaydigan" model: chat uchun o'ylashni kamaytiramiz — tezroq va limit tejaladi.
-  if (config.aiProvider === "gemini") body.reasoning_effort = "low";
+  if (config.aiProvider === "openai") {
+    // OpenAI: yangi modellar max_completion_tokens qabul qiladi; o'ylaydigan (gpt-5, o-seriya) modellarda temperature yo'q
+    body.max_completion_tokens = 8192;
+    if (/^(gpt-5|o\d)/.test(model)) body.reasoning_effort = "low";
+    else body.temperature = 0.7;
+  } else {
+    body.max_tokens = 8192;
+    body.temperature = 0.7;
+    // Gemini "o'ylaydigan" model: chat uchun o'ylashni kamaytiramiz — tezroq va limit tejaladi.
+    if (config.aiProvider === "gemini") body.reasoning_effort = "low";
+  }
 
   let res;
   try {

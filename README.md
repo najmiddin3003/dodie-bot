@@ -52,6 +52,7 @@ yoki matnda "Dodie" so'zi bo'lsa. Oddiy xabarlarni ham ko'rishi uchun BotFather'
 | `gemini` (standart) | https://aistudio.google.com/apikey | `gemini-flash-latest` |
 | `groq` | https://console.groq.com/keys | `llama-3.3-70b-versatile` |
 | `openrouter` | https://openrouter.ai/keys | `meta-llama/llama-3.3-70b-instruct:free` |
+| `openai` (pullik) | https://platform.openai.com/api-keys | `gpt-5-mini` |
 
 Model topilmasa (404), `AI_MODEL=` ga provayder saytidagi aniq nomni yozing.
 
