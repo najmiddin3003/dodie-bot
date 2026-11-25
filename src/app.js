@@ -3,6 +3,7 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import { config } from "./env.js";
 import * as store from "./store.js";
+import { FORMAT_LIB_SOURCE } from "./format.js";
 import { kv, kvKind } from "./kv.js";
 import { botStatus, generateReply, enqueue, handleMessage, IS_VERCEL, webhookSecret, setupWebhook, webhookStatus } from "./bot.js";
 
@@ -81,11 +82,9 @@ function checkAuth(req) {
 
 // Vercel fayllarni to'g'ri ko'chirishi uchun yo'llar statik (new URL(..., import.meta.url)) yozilgan
 const PANEL_HTML = new URL("../panel/index.html", import.meta.url);
-const FORMAT_JS = new URL("./format.js", import.meta.url);
 const STATIC = {
   "/": { file: PANEL_HTML, type: "text/html; charset=utf-8" },
   "/index.html": { file: PANEL_HTML, type: "text/html; charset=utf-8" },
-  "/lib/format.js": { file: FORMAT_JS, type: "text/javascript; charset=utf-8" },
 };
 
 // ---------- SSE (faqat lokal rejimda) ----------
@@ -126,8 +125,7 @@ async function route(req, res) {
     let body = fs.readFileSync(file, "utf8");
     if (file === PANEL_HTML) {
       // format.js ni sahifaning o'ziga joylaymiz — alohida so'rov kerak bo'lmasin
-      const lib = fs.readFileSync(FORMAT_JS, "utf8").replace(/^export /gm, "");
-      body = body.replace('import { toTelegramHtml, escapeHtml } from "/lib/format.js";', lib);
+      body = body.replace('import { toTelegramHtml, escapeHtml } from "/lib/format.js";', FORMAT_LIB_SOURCE);
     }
     return send(res, 200, body, { "content-type": type });
   }
