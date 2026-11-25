@@ -217,7 +217,8 @@ export async function webhookStatus(publicUrl) {
     const me = await tg("getMe");
     const info = await tg("getWebhookInfo");
     const expected = publicUrl ? `${publicUrl.replace(/\/+$/, "")}/api/telegram` : null;
-    const connected = Boolean(info.url) && (!expected || info.url === expected);
+    // Manzil domeni farq qilishi mumkin (vercel.app / o'z domeni) — yo'l to'g'ri bo'lsa yetarli
+    const connected = Boolean(info.url) && (info.url === expected || info.url.endsWith("/api/telegram"));
     const lastErr = info.last_error_date && Date.now() / 1000 - info.last_error_date < 3600 ? info.last_error_message : null;
     return {
       state: connected ? (lastErr ? "offline" : "online") : "no_webhook",

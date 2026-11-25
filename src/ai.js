@@ -57,36 +57,58 @@ export function ownerHintFor(err) {
  */
 let activeModel = config.aiModel;
 
-/** Model topilmasa (eskirgan bo'lsa), provayderning ro'yxatidan mos chat modelini tanlaydi. */
-async function pickAvailableModel() {
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+let candidatesCache = null;
+
+/** Provayderdagi mos chat modellari (afzal tartibda) — eskirgan yoki band model o'rniga. */
+async function listCandidates() {
+  if (candidatesCache) return candidatesCache;
   const res = await fetch(`${config.aiBaseUrl}/models`, {
     headers: { authorization: `Bearer ${config.aiKey}` },
     signal: AbortSignal.timeout(15_000),
   });
-  if (!res.ok) return null;
+  if (!res.ok) return [];
   const data = await res.json().catch(() => null);
   const ids = (data?.data ?? []).map((m) => String(m.id).replace(/^models\//, ""));
-  const bad = /(image|tts|audio|live|embed|vision|preview-tts|robotics|computer|lite)/i;
-  const prefs = config.aiProvider === "gemini" ? [/^gemini-flash-latest$/, /^gemini-[\d.]+-flash$/, /flash/] : [/./];
-  for (const re of prefs) {
-    const hit = ids.filter((id) => re.test(id) && !bad.test(id)).sort().reverse()[0];
-    if (hit) return hit;
-  }
-  return null;
+  const bad = /(image|tts|audio|live|embed|vision|robotics|computer|native|thinking-exp)/i;
+  const usable = ids.filter((id) => !bad.test(id));
+  if (config.aiProvider !== "gemini") return (candidatesCache = usable);
+  const order = [/^gemini-flash-latest$/, /^gemini-[\d.]+-flash$/, /^gemini-flash-lite-latest$/, /^gemini-[\d.]+-flash-lite$/, /flash/];
+  const out = [];
+  for (const re of order) for (const id of usable.filter((x) => re.test(x)).sort().reverse()) if (!out.includes(id)) out.push(id);
+  return (candidatesCache = out);
 }
 
+/**
+ * Model topilmasa — boshqasiga doimiy o'tadi.
+ * Model band (503) yoki limit (429) bo'lsa — bir marta qayta urinadi, keyin boshqa modelni sinaydi.
+ */
 export async function askDodie(args) {
   if (!config.aiKey) throw new AiError("no_key", "AI_API_KEY berilmagan");
-  try {
-    return await callModel(activeModel, args);
-  } catch (err) {
-    if (err.kind !== "model") throw err;
-    const alt = await pickAvailableModel().catch(() => null);
-    if (!alt || alt === activeModel) throw err;
-    console.warn(`[ai] "${activeModel}" topilmadi — "${alt}" ishlatiladi`);
-    activeModel = alt;
-    return callModel(activeModel, args);
+  const tried = new Set();
+  let model = activeModel;
+  let retriedSame = false;
+  let lastErr;
+  for (let step = 0; step < 4; step++) {
+    try {
+      return await callModel(model, args);
+    } catch (err) {
+      lastErr = err;
+      if (!["model", "server", "rate"].includes(err.kind)) throw err;
+      if (err.kind === "server" && !retriedSame) {
+        retriedSame = true;
+        await sleep(1500);
+        continue;
+      }
+      tried.add(model);
+      const alt = (await listCandidates().catch(() => [])).find((id) => !tried.has(id));
+      if (!alt) throw err;
+      console.warn(`[ai] "${model}" ishlamadi (${err.kind}) — "${alt}" sinab ko'riladi`);
+      if (err.kind === "model") activeModel = alt;
+      model = alt;
+    }
   }
+  throw lastErr;
 }
 
 async function callModel(model, { persona, history }) {
