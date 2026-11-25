@@ -1,0 +1,14 @@
+{
+  "name": "dodie-bot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Dodie — Claude AI bilan ishlaydigan Telegram bot va HTML boshqaruv paneli",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "engines": {
+    "node": ">=20.12"
+  }
+}
