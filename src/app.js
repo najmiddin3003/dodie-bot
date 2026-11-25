@@ -123,7 +123,13 @@ async function route(req, res) {
 
   if (req.method === "GET" && STATIC[p]) {
     const { file, type } = STATIC[p];
-    return send(res, 200, fs.readFileSync(file), { "content-type": type });
+    let body = fs.readFileSync(file, "utf8");
+    if (file === PANEL_HTML) {
+      // format.js ni sahifaning o'ziga joylaymiz — alohida so'rov kerak bo'lmasin
+      const lib = fs.readFileSync(FORMAT_JS, "utf8").replace(/^export /gm, "");
+      body = body.replace('import { toTelegramHtml, escapeHtml } from "/lib/format.js";', lib);
+    }
+    return send(res, 200, body, { "content-type": type });
   }
 
   if (!p.startsWith("/api/")) return send(res, 404, { error: "Topilmadi" });
