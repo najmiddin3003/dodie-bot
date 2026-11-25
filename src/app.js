@@ -104,7 +104,8 @@ if (!IS_VERCEL) {
 // ---------- marshrutlar ----------
 async function route(req, res) {
   const url = new URL(req.url, "http://localhost");
-  const p = url.pathname;
+  // Vercel rewrite asl yo'lni ?__path= orqali uzatadi (vercel.json)
+  const p = url.searchParams.get("__path") || url.pathname;
 
   // Telegram webhook (parolsiz, lekin maxfiy kalit bilan tekshiriladi)
   if (p === "/api/telegram") {
