@@ -222,7 +222,7 @@ async function api(path, body) {
 // ---------- Holat ----------
 const STATUS = {
   online: ["ok", "Onlayn"], starting: ["", "Ishga tushmoqda…"], offline: ["warn", "Ulanish yo'q"],
-  no_token: ["bad", "Token yo'q"], bad_token: ["bad", "Token noto'g'ri"], conflict: ["warn", "Ikki nusxa ishlayapti"],
+  no_token: ["bad", "Token yo'q"], no_webhook: ["warn", "Webhook ulanmagan"], bad_token: ["bad", "Token noto'g'ri"], conflict: ["warn", "Ikki nusxa ishlayapti"],
 };
 
 function renderStatus() {
@@ -240,11 +240,18 @@ function renderStatus() {
   $("stTokens").textContent = fmtNum(stats.promptTokens + stats.completionTokens);
 
   const alerts = [];
-  if (bot.error) alerts.push(["bad", escapeHtml(bot.error)]);
+  if (bot.state === "no_webhook") alerts.push(["warn", `${escapeHtml(bot.error)}<div class="row"><button class="btn primary" id="hookBtn">Webhookni ulash</button></div>`]);
+  else if (bot.error) alerts.push(["bad", escapeHtml(bot.error)]);
+  if (state.mode === "vercel" && state.storage !== "redis") alerts.push(["warn", "Vercel'da xotira ulanmagan: suhbatlar saqlanmaydi. Vercel → Storage → <b>Upstash (Redis)</b> qo'shing va qayta deploy qiling."]);
   if (!ai.keySet) alerts.push(["warn", `.env faylida <b>AI_API_KEY</b> yo'q. Bepul kalitni <a href="${escapeHtml(ai.keyUrl)}">shu yerdan</a> oling, .env ga yozing va serverni qayta ishga tushiring.`]);
   else if (bot.lastError) alerts.push(["bad", "AI xatosi: " + linkify(bot.lastError.hint)]);
   $("alerts").innerHTML = alerts.map(([c, h]) => `<div class="alert ${c}">${h}</div>`).join("");
 }
+$("alerts").addEventListener("click", async (e) => {
+  if (e.target.id !== "hookBtn") return;
+  e.target.disabled = true;
+  try { await api("/api/webhook", {}); await refresh(); } catch (err) { alert("Xato: " + err.message); e.target.disabled = false; }
+});
 const linkify = (s) => escapeHtml(s).replace(/https?:\/\/\S+/g, (u) => `<a href="${u}">${u}</a>`);
 
 // ---------- Sozlamalar ----------
@@ -352,7 +359,12 @@ $("convHead").addEventListener("click", async (e) => {
 
 // ---------- Jonli yangilanishlar ----------
 async function refresh() {
-  state = await api("/api/state");
+  try {
+    state = await api("/api/state");
+  } catch (err) {
+    document.querySelector("main").innerHTML = `<div class="card pad" style="grid-column:1/-1"><div class="alert bad">${escapeHtml(err.message)}</div></div>`;
+    throw err;
+  }
   renderStatus();
   renderSettings();
   renderList();
@@ -380,8 +392,19 @@ function connectEvents() {
 
 await refresh();
 await openChat(PANEL);
-connectEvents();
-setInterval(() => refresh().catch(() => {}), 15000);
+if (state.mode === "local") {
+  connectEvents();
+  setInterval(() => refresh().catch(() => {}), 15000);
+} else {
+  // Vercel'da jonli oqim yo'q — har 5 soniyada yangilaymiz
+  setInterval(async () => {
+    await refresh().catch(() => {});
+    if (!waiting && document.activeElement?.id !== "draft") {
+      const fresh = await api(`/api/chats/${encodeURIComponent(selected)}`).catch(() => null);
+      if (fresh && fresh.messages.length !== current?.messages.length) { current = fresh; renderConv(); }
+    }
+  }, 5000);
+}
 </script>
 </body>
 </html>

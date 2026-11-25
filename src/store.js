@@ -1,11 +1,8 @@
-// Suhbatlar, sozlamalar va statistikani saqlash (data/state.json).
-import fs from "node:fs";
-import path from "node:path";
+// Suhbatlar, sozlamalar va statistika (kv.js orqali: fayl yoki Upstash Redis).
 import { EventEmitter } from "node:events";
-import { ROOT, config } from "./env.js";
+import { config } from "./env.js";
+import { kv } from "./kv.js";
 
-const DATA_DIR = path.join(ROOT, "data");
-const STATE_FILE = path.join(DATA_DIR, "state.json");
 const MAX_STORED = 200; // panelda ko'rsatish uchun har bir chatda saqlanadigan xabarlar
 
 export const DEFAULT_PERSONA = `Sening isming Dodie. Sen Telegram'dagi samimiy, quvnoq va aqlli yordamchisan.
@@ -14,140 +11,99 @@ export const DEFAULT_PERSONA = `Sening isming Dodie. Sen Telegram'dagi samimiy, 
 - Bilmagan narsangni to'qib chiqarma — bilmasligingni ochiq ayt.
 - Kimligingni so'rashsa: "Men Dodie — sun'iy intellekt yordamchisiman" de.`;
 
+// Faqat lokal rejimda (SSE orqali panelga jonli yuborish uchun)
 export const events = new EventEmitter();
 events.setMaxListeners(100);
 
-const state = load();
-
-function load() {
-  const empty = {
-    settings: { persona: DEFAULT_PERSONA, enabled: true },
-    stats: { replies: 0, errors: 0, promptTokens: 0, completionTokens: 0 },
-    chats: {},
-  };
-  try {
-    const saved = JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
-    return {
-      settings: { ...empty.settings, ...saved.settings },
-      stats: { ...empty.stats, ...saved.stats },
-      chats: saved.chats ?? {},
-    };
-  } catch (err) {
-    if (err.code !== "ENOENT") console.warn("[store] state.json o'qilmadi, yangidan boshlanadi:", err.message);
-    return empty;
-  }
-}
-
-let saveTimer = null;
-function scheduleSave() {
-  if (saveTimer) return;
-  saveTimer = setTimeout(() => {
-    saveTimer = null;
-    saveNow();
-  }, 1000);
-}
-
-export function saveNow() {
-  try {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-    const tmp = STATE_FILE + ".tmp";
-    fs.writeFileSync(tmp, JSON.stringify(state, null, 1));
-    try {
-      fs.renameSync(tmp, STATE_FILE);
-    } catch {
-      fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 1));
-    }
-  } catch (err) {
-    console.error("[store] saqlashda xato:", err.message);
-  }
-}
-
 // ---------- sozlamalar ----------
-export function getSettings() {
-  return { ...state.settings };
+export async function getSettings() {
+  return { persona: DEFAULT_PERSONA, enabled: true, ...(await kv.get("settings")) };
 }
 
-export function updateSettings(patch) {
-  if (typeof patch.persona === "string") {
-    state.settings.persona = patch.persona.trim().slice(0, 8000) || DEFAULT_PERSONA;
-  }
-  if (typeof patch.enabled === "boolean") state.settings.enabled = patch.enabled;
-  scheduleSave();
-  events.emit("settings", getSettings());
-  return getSettings();
+export async function updateSettings(patch) {
+  const s = await getSettings();
+  if (typeof patch.persona === "string") s.persona = patch.persona.trim().slice(0, 8000) || DEFAULT_PERSONA;
+  if (typeof patch.enabled === "boolean") s.enabled = patch.enabled;
+  await kv.set("settings", s);
+  events.emit("settings", s);
+  return s;
 }
 
 // ---------- statistika ----------
-export function getStats() {
-  return { ...state.stats, chats: Object.keys(state.chats).length };
+export async function getStats() {
+  const h = await kv.hgetall("stats");
+  return {
+    replies: h.replies ?? 0,
+    errors: h.errors ?? 0,
+    promptTokens: h.promptTokens ?? 0,
+    completionTokens: h.completionTokens ?? 0,
+    chats: await kv.zcard("chats"),
+  };
 }
 
-export function addStats({ replies = 0, errors = 0, promptTokens = 0, completionTokens = 0 }) {
-  const s = state.stats;
-  s.replies += replies;
-  s.errors += errors;
-  s.promptTokens += promptTokens;
-  s.completionTokens += completionTokens;
-  scheduleSave();
-  events.emit("stats", getStats());
+export async function addStats(fields) {
+  await kv.incr("stats", fields);
+  events.emit("stats", await getStats());
 }
 
 // ---------- suhbatlar ----------
 // chat = { id, title, type, messages: [...], ctxStart, updatedAt }
 // message = { role: "user"|"assistant"|"note", text, from?, at, skip?, error? }
 
-export function upsertChat(id, { title, type }) {
-  const key = String(id);
-  let chat = state.chats[key];
-  if (!chat) {
-    chat = state.chats[key] = { id: key, title, type, messages: [], ctxStart: 0, updatedAt: Date.now() };
-  } else {
-    if (title) chat.title = title;
-    if (type) chat.type = type;
-  }
-  return chat;
+async function loadChat(id) {
+  return kv.get(`chat:${id}`);
 }
 
-export function addMessage(chatId, message) {
-  const chat = state.chats[String(chatId)];
+async function saveChat(chat) {
+  await kv.set(`chat:${chat.id}`, chat);
+  await kv.zadd("chats", chat.updatedAt, chat.id);
+}
+
+/** Xabar qo'shadi (chat bo'lmasa yaratadi). Saqlangan xabarni qaytaradi. */
+export async function addMessage(chatId, meta, message) {
+  const id = String(chatId);
+  const chat = (await loadChat(id)) ?? { id, messages: [], ctxStart: 0, updatedAt: 0 };
+  if (meta?.title) chat.title = meta.title;
+  if (meta?.type) chat.type = meta.type;
+
   const msg = { ...message, at: Date.now() };
   chat.messages.push(msg);
 
-  // AI ga yuboriladigan kontekst HISTORY_LIMIT dan oshsa, yarmigacha qisqartiramiz
-  // (bo'lib-bo'lib qisqartirish — har xabarda emas).
+  // AI ga yuboriladigan kontekst HISTORY_LIMIT dan oshsa, yarmigacha qisqartiramiz.
   const limit = config.historyLimit;
   if (chat.messages.length - chat.ctxStart > limit) {
     chat.ctxStart = chat.messages.length - Math.ceil(limit / 2);
   }
-  // Panel uchun saqlanadigan xabarlar sonini cheklash
   if (chat.messages.length > MAX_STORED) {
     const drop = chat.messages.length - MAX_STORED;
     chat.messages.splice(0, drop);
     chat.ctxStart = Math.max(0, chat.ctxStart - drop);
   }
   chat.updatedAt = msg.at;
-  scheduleSave();
-  events.emit("message", { chatId: chat.id, message: msg, chat: summarize(chat) });
+  await saveChat(chat);
+  events.emit("message", { chatId: id, message: msg, chat: summarize(chat) });
   return msg;
 }
 
-/** Xabarni AI kontekstidan chiqarib tashlash (masalan, xatolik bo'lganda). */
-export function markSkipped(msg) {
-  msg.skip = true;
-  scheduleSave();
+/** Xabarni AI kontekstidan chiqarish (masalan, xatolik bo'lganda). */
+export async function markSkipped(chatId, at) {
+  const chat = await loadChat(String(chatId));
+  const m = chat?.messages.findLast((x) => x.at === at && x.role === "user");
+  if (!m) return;
+  m.skip = true;
+  await saveChat(chat);
 }
 
-export function resetContext(chatId) {
-  const chat = state.chats[String(chatId)];
-  if (!chat) return;
-  addMessage(chatId, { role: "note", text: "Suhbat yangilandi — Dodie oldingi xabarlarni unutdi" });
+export async function resetContext(chatId, meta) {
+  await addMessage(chatId, meta, { role: "note", text: "Suhbat yangilandi — Dodie oldingi xabarlarni unutdi" });
+  const chat = await loadChat(String(chatId));
   chat.ctxStart = chat.messages.length;
-  scheduleSave();
+  await saveChat(chat);
 }
 
 /** AI uchun xabarlar ro'yxati (OpenAI formatida). */
-export function contextFor(chatId) {
-  const chat = state.chats[String(chatId)];
+export async function contextFor(chatId) {
+  const chat = await loadChat(String(chatId));
   if (!chat) return [];
   const isGroup = chat.type === "group" || chat.type === "supergroup";
   const out = [];
@@ -172,14 +128,14 @@ function summarize(chat) {
   };
 }
 
-export function listChats() {
-  return Object.values(state.chats)
-    .map(summarize)
-    .sort((a, b) => b.updatedAt - a.updatedAt);
+export async function listChats(limit = 100) {
+  const ids = await kv.zrevrange("chats", limit);
+  const chats = await Promise.all(ids.map(loadChat));
+  return chats.filter(Boolean).map(summarize);
 }
 
-export function getChat(chatId) {
-  const chat = state.chats[String(chatId)];
+export async function getChat(chatId) {
+  const chat = await loadChat(String(chatId));
   if (!chat) return null;
   return { ...summarize(chat), messages: chat.messages, ctxStart: chat.ctxStart };
 }

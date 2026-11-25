@@ -1,15 +1,25 @@
-// Telegram bot: long polling (webhook va domen shart emas).
+// Telegram bot logikasi: lokalda long polling, Vercel'da webhook.
+import crypto from "node:crypto";
 import { config } from "./env.js";
 import * as store from "./store.js";
+import { kv } from "./kv.js";
 import { askDodie, userMessageFor, ownerHintFor } from "./ai.js";
 import { toTelegramHtml, splitMessage } from "./format.js";
 
+export const IS_VERCEL = Boolean(process.env.VERCEL);
+
+/** Webhook so'rovlari haqiqatan Telegram'dan kelganini tekshirish uchun maxfiy kalit (tokendan hosil qilinadi). */
+export const webhookSecret = config.telegramToken
+  ? crypto.createHash("sha256").update("dodie-webhook:" + config.telegramToken).digest("hex").slice(0, 48)
+  : "";
+
+// Lokal rejim holati (Vercel'da getWebhookInfo ishlatiladi)
 export const botStatus = {
   state: "starting", // starting | online | offline | no_token | bad_token | conflict
   username: null,
   name: null,
   error: null,
-  lastError: null, // oxirgi AI xatosi (panel uchun)
+  lastError: null,
 };
 
 function setStatus(patch) {
@@ -20,7 +30,7 @@ function setStatus(patch) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ---------- Telegram API ----------
-async function tg(method, params = {}, timeoutMs = 15_000) {
+export async function tg(method, params = {}, timeoutMs = 15_000) {
   let res;
   try {
     res = await fetch(`${config.telegramApi}/bot${config.telegramToken}/${method}`, {
@@ -30,7 +40,7 @@ async function tg(method, params = {}, timeoutMs = 15_000) {
       signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (err) {
-    // Tokenni logga chiqarmaslik uchun URL'siz xabar
+    // Token URL ichida — xabarda URL ko'rsatilmaydi
     const e = new Error(`Telegram'ga ulanib bo'lmadi (${err.cause?.code ?? err.name})`);
     e.network = true;
     throw e;
@@ -53,13 +63,11 @@ async function sendReply(chatId, text, replyTo) {
       await tg("sendMessage", { ...params, text: toTelegramHtml(chunk), parse_mode: "HTML" });
     } catch (err) {
       if (err.code !== 400) throw err;
-      // HTML formatlash buzilgan bo'lsa — oddiy matn sifatida yuboramiz
-      await tg("sendMessage", { ...params, text: chunk });
+      await tg("sendMessage", { ...params, text: chunk }); // HTML buzilgan bo'lsa — oddiy matn
     }
   }
 }
 
-/** "yozmoqda..." ko'rsatkichini javob tayyor bo'lguncha ushlab turish. */
 function keepTyping(chatId) {
   const ping = () => tg("sendChatAction", { chat_id: chatId, action: "typing" }).catch(() => {});
   ping();
@@ -79,26 +87,28 @@ export function enqueue(chatId, task) {
   return next;
 }
 
-/** Foydalanuvchi xabarini saqlaydi, AI dan javob oladi, natijani saqlaydi. */
 export async function generateReply(chatId, chatMeta, text, fromName) {
-  store.upsertChat(chatId, chatMeta);
-  const userMsg = store.addMessage(chatId, { role: "user", text, from: fromName });
+  const userMsg = await store.addMessage(chatId, chatMeta, { role: "user", text, from: fromName });
   try {
     const result = await askDodie({
-      persona: store.getSettings().persona,
-      history: store.contextFor(chatId),
+      persona: (await store.getSettings()).persona,
+      history: await store.contextFor(chatId),
     });
-    store.addMessage(chatId, { role: "assistant", text: result.text });
-    store.addStats({ replies: 1, ...result.usage });
-    if (botStatus.lastError) setStatus({ lastError: null });
+    await store.addMessage(chatId, null, { role: "assistant", text: result.text });
+    await store.addStats({ replies: 1, ...result.usage });
+    if (botStatus.lastError || IS_VERCEL) {
+      setStatus({ lastError: null });
+      await kv.set("lastError", null);
+    }
     return { ok: true, text: result.text };
   } catch (err) {
-    store.markSkipped(userMsg); // muvaffaqiyatsiz savol keyingi kontekstga kirmasin
+    await store.markSkipped(chatId, userMsg.at); // muvaffaqiyatsiz savol keyingi kontekstga kirmasin
     const hint = ownerHintFor(err);
     console.error(`[ai] ${err.kind ?? "xato"}: ${err.message}`);
-    store.addMessage(chatId, { role: "note", text: hint, error: true });
-    store.addStats({ errors: 1 });
+    await store.addMessage(chatId, null, { role: "note", text: hint, error: true });
+    await store.addStats({ errors: 1 });
     setStatus({ lastError: { hint, at: Date.now() } });
+    await kv.set("lastError", botStatus.lastError);
     return { ok: false, text: userMessageFor(err), hint };
   }
 }
@@ -121,24 +131,27 @@ function chatMetaOf(chat) {
   return { title, type: chat.type };
 }
 
-async function handleMessage(msg) {
+let meCache = null;
+async function myUsername() {
+  if (botStatus.username) return botStatus.username;
+  meCache ??= tg("getMe").then((me) => me.username).catch(() => { meCache = null; return ""; });
+  return meCache;
+}
+
+/** Bitta Telegram xabarini qayta ishlaydi; javob yuborilgunicha kutadi. */
+export async function handleMessage(msg) {
   const chat = msg.chat;
   const isPrivate = chat.type === "private";
-  const me = botStatus.username ?? "";
   let text = msg.text ?? "";
 
-  // Faqat ruxsat berilgan foydalanuvchilar (ALLOWED_USER_IDS bo'sh bo'lsa — hamma)
   if (config.allowedUserIds.size && !config.allowedUserIds.has(msg.from?.id)) {
     if (isPrivate) {
-      await tg("sendMessage", {
-        chat_id: chat.id,
-        text: `Kechirasiz, bu bot yopiq. Sizning Telegram ID: ${msg.from?.id}`,
-      }).catch(() => {});
+      await tg("sendMessage", { chat_id: chat.id, text: `Kechirasiz, bu bot yopiq. Sizning Telegram ID: ${msg.from?.id}` }).catch(() => {});
     }
     return;
   }
 
-  // Buyruqlar: /start, /help, /reset (guruhda /reset@dodie_bot ko'rinishida ham)
+  const me = await myUsername();
   const cmd = text.match(/^\/(\w+)(?:@(\w+))?/);
   if (cmd) {
     if (cmd[2] && cmd[2].toLowerCase() !== me.toLowerCase()) return; // boshqa botga
@@ -148,35 +161,32 @@ async function handleMessage(msg) {
       return;
     }
     if (name === "reset" || name === "yangi") {
-      store.upsertChat(chat.id, chatMetaOf(chat));
-      store.resetContext(chat.id);
+      await store.resetContext(chat.id, chatMetaOf(chat));
       await tg("sendMessage", { chat_id: chat.id, text: "🧹 Suhbat yangilandi. Qani, yangi savol bering!" });
       return;
     }
   }
 
   if (!text.trim()) {
-    if (isPrivate && !msg.new_chat_members && !msg.left_chat_member) {
-      await tg("sendMessage", { chat_id: chat.id, text: "Hozircha faqat matnli xabarlarga javob bera olaman 🙂" });
-    }
+    if (isPrivate) await tg("sendMessage", { chat_id: chat.id, text: "Hozircha faqat matnli xabarlarga javob bera olaman 🙂" });
     return;
   }
 
-  // Guruhda faqat murojaat qilinganda javob beramiz: @mention, reply yoki "Dodie" so'zi
+  // Guruhda faqat murojaat qilinganda: @mention, reply yoki "Dodie" so'zi
   if (!isPrivate) {
     const mentioned = me && text.toLowerCase().includes(`@${me.toLowerCase()}`);
-    const repliedToMe = msg.reply_to_message?.from?.username === me;
+    const repliedToMe = me && msg.reply_to_message?.from?.username === me;
     const calledByName = /(^|[^\p{L}])dodie([^\p{L}]|$)/iu.test(text);
     if (!mentioned && !repliedToMe && !calledByName) return;
     if (me) text = text.replace(new RegExp(`@${me}`, "ig"), "").trim() || "Salom!";
   }
 
-  if (!store.getSettings().enabled) {
+  if (!(await store.getSettings()).enabled) {
     if (isPrivate) await tg("sendMessage", { chat_id: chat.id, text: "Dodie hozir dam olyapti 😴 Keyinroq yozing." });
     return;
   }
 
-  enqueue(String(chat.id), async () => {
+  await enqueue(String(chat.id), async () => {
     const stopTyping = keepTyping(chat.id);
     try {
       const reply = await generateReply(chat.id, chatMetaOf(chat), text, displayName(msg.from));
@@ -187,15 +197,50 @@ async function handleMessage(msg) {
   });
 }
 
-// ---------- Ishga tushirish ----------
-export async function startBot() {
+// ---------- Webhook (Vercel) ----------
+const COMMANDS = [
+  { command: "reset", description: "Suhbatni yangidan boshlash" },
+  { command: "help", description: "Yordam" },
+];
+
+export async function setupWebhook(publicUrl) {
+  const url = `${publicUrl.replace(/\/+$/, "")}/api/telegram`;
+  await tg("setWebhook", { url, secret_token: webhookSecret, allowed_updates: ["message"], drop_pending_updates: false });
+  await tg("setMyCommands", { commands: COMMANDS }).catch(() => {});
+  return url;
+}
+
+/** Vercel rejimidagi holat (panel uchun). */
+export async function webhookStatus(publicUrl) {
+  if (!config.telegramToken) return { state: "no_token", error: "Vercel sozlamalarida TELEGRAM_BOT_TOKEN yo'q" };
+  try {
+    const me = await tg("getMe");
+    const info = await tg("getWebhookInfo");
+    const expected = publicUrl ? `${publicUrl.replace(/\/+$/, "")}/api/telegram` : null;
+    const connected = Boolean(info.url) && (!expected || info.url === expected);
+    const lastErr = info.last_error_date && Date.now() / 1000 - info.last_error_date < 3600 ? info.last_error_message : null;
+    return {
+      state: connected ? (lastErr ? "offline" : "online") : "no_webhook",
+      username: me.username,
+      name: me.first_name,
+      webhookUrl: info.url || null,
+      pending: info.pending_update_count,
+      error: connected ? (lastErr ? `Telegram webhook xatosi: ${lastErr}` : null) : "Webhook ulanmagan — panelda «Webhookni ulash» tugmasini bosing.",
+    };
+  } catch (err) {
+    if (err.code === 401 || err.code === 404) return { state: "bad_token", error: "TELEGRAM_BOT_TOKEN noto'g'ri." };
+    return { state: "offline", error: err.message };
+  }
+}
+
+// ---------- Long polling (lokal) ----------
+export async function startPolling() {
   if (!config.telegramToken) {
     setStatus({ state: "no_token", error: ".env faylida TELEGRAM_BOT_TOKEN yo'q" });
     console.warn("[bot] TELEGRAM_BOT_TOKEN yo'q — faqat panel ishlaydi.");
     return;
   }
 
-  // getMe — token to'g'riligini tekshirish
   for (let attempt = 0; ; attempt++) {
     try {
       const me = await tg("getMe");
@@ -213,13 +258,9 @@ export async function startBot() {
     }
   }
 
+  // Avval Vercel'da webhook ulangan bo'lsa, long polling ishlamaydi — o'chiramiz.
   await tg("deleteWebhook").catch(() => {});
-  await tg("setMyCommands", {
-    commands: [
-      { command: "reset", description: "Suhbatni yangidan boshlash" },
-      { command: "help", description: "Yordam" },
-    ],
-  }).catch(() => {});
+  await tg("setMyCommands", { commands: COMMANDS }).catch(() => {});
 
   let offset = 0;
   let failures = 0;
@@ -235,7 +276,7 @@ export async function startBot() {
     } catch (err) {
       failures++;
       if (err.code === 409) {
-        setStatus({ state: "conflict", error: "Bu bot boshqa joyda ham ishga tushirilgan. Ikkinchi nusxani to'xtating." });
+        setStatus({ state: "conflict", error: "Bu bot boshqa joyda ham ishga tushirilgan (yoki Vercel webhook ulangan). Ikkinchi nusxani to'xtating." });
       } else if (err.code === 401) {
         setStatus({ state: "bad_token", error: "TELEGRAM_BOT_TOKEN noto'g'ri." });
         return;
