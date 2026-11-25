@@ -28,6 +28,7 @@ export function userMessageFor(err) {
     case "empty":
       return "Bu savolga javob bera olmadim. Boshqacharoq so'rab ko'ring.";
     case "network":
+    case "timeout":
     case "server":
       return "AI xizmatiga ulanib bo'lmadi. Birozdan keyin qayta urinib ko'ring.";
     default:
@@ -56,13 +57,25 @@ export function ownerHintFor(err) {
  * @returns {Promise<{ text: string, usage: {promptTokens:number, completionTokens:number}, model: string }>}
  */
 let activeModel = config.aiModel;
+// Vercel funksiyasi 120 soniyada to'xtaydi — AI uchun umumiy vaqt shundan kamroq
+const AI_BUDGET_MS = process.env.VERCEL ? 95_000 : 150_000;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let candidatesCache = null;
 
 /** Provayderdagi mos chat modellari (afzal tartibda) — eskirgan yoki band model o'rniga. */
+// Gemini uchun zaxira modellar (Google ro'yxatni bermasa ham sinab ko'riladi)
+const GEMINI_FALLBACKS = ["gemini-flash-latest", "gemini-flash-lite-latest", "gemini-3-flash", "gemini-2.5-flash-lite"];
+
 async function listCandidates() {
   if (candidatesCache) return candidatesCache;
+  const listed = await listModels().catch(() => []);
+  const out = config.aiProvider === "gemini" ? [...listed, ...GEMINI_FALLBACKS.filter((m) => !listed.includes(m))] : listed;
+  if (listed.length) candidatesCache = out;
+  return out;
+}
+
+async function listModels() {
   const res = await fetch(`${config.aiBaseUrl}/models`, {
     headers: { authorization: `Bearer ${config.aiKey}` },
     signal: AbortSignal.timeout(15_000),
@@ -72,11 +85,11 @@ async function listCandidates() {
   const ids = (data?.data ?? []).map((m) => String(m.id).replace(/^models\//, ""));
   const bad = /(image|tts|audio|live|embed|vision|robotics|computer|native|thinking-exp)/i;
   const usable = ids.filter((id) => !bad.test(id));
-  if (config.aiProvider !== "gemini") return (candidatesCache = usable);
+  if (config.aiProvider !== "gemini") return usable;
   const order = [/^gemini-flash-latest$/, /^gemini-[\d.]+-flash$/, /^gemini-flash-lite-latest$/, /^gemini-[\d.]+-flash-lite$/, /flash/];
   const out = [];
   for (const re of order) for (const id of usable.filter((x) => re.test(x)).sort().reverse()) if (!out.includes(id)) out.push(id);
-  return (candidatesCache = out);
+  return out;
 }
 
 /**
@@ -85,16 +98,19 @@ async function listCandidates() {
  */
 export async function askDodie(args) {
   if (!config.aiKey) throw new AiError("no_key", "AI_API_KEY berilmagan");
+  const deadline = Date.now() + AI_BUDGET_MS;
   const tried = new Set();
   let model = activeModel;
   let retriedSame = false;
   let lastErr;
   for (let step = 0; step < 4; step++) {
     try {
-      return await callModel(model, args);
+      const left = deadline - Date.now();
+      if (left < 5000) break;
+      return await callModel(model, args, Math.min(left, 35_000));
     } catch (err) {
       lastErr = err;
-      if (!["model", "server", "rate"].includes(err.kind)) throw err;
+      if (!["model", "server", "rate", "timeout"].includes(err.kind)) throw err;
       if (err.kind === "server" && !retriedSame) {
         retriedSame = true;
         await sleep(1500);
@@ -108,10 +124,10 @@ export async function askDodie(args) {
       model = alt;
     }
   }
-  throw lastErr;
+  throw lastErr ?? new AiError("timeout", "AI javob berishga ulgurmadi");
 }
 
-async function callModel(model, { persona, history }) {
+async function callModel(model, { persona, history }, timeoutMs) {
 
   const body = {
     model,
@@ -132,13 +148,19 @@ async function callModel(model, { persona, history }) {
         "x-title": "Dodie Telegram bot", // OpenRouter uchun ixtiyoriy
       },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(90_000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (err) {
+    if (err.name === "TimeoutError") throw new AiError("timeout", `"${model}" ${Math.round(timeoutMs / 1000)} soniyada javob bermadi`);
     throw new AiError("network", `Tarmoq xatosi: ${err.cause?.code ?? err.message}`);
   }
 
-  const raw = await res.text();
+  let raw;
+  try {
+    raw = await res.text();
+  } catch (err) {
+    throw new AiError(err.name === "TimeoutError" ? "timeout" : "network", `"${model}" javobi uzildi: ${err.message}`);
+  }
   let data = null;
   try {
     data = JSON.parse(raw);
