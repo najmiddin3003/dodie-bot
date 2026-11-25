@@ -1,8 +1,7 @@
 // HTTP marshrutlar — lokal server (server.js) va Vercel (api/index.js) uchun umumiy.
 import fs from "node:fs";
-import path from "node:path";
 import crypto from "node:crypto";
-import { config, ROOT } from "./env.js";
+import { config } from "./env.js";
 import * as store from "./store.js";
 import { kv, kvKind } from "./kv.js";
 import { botStatus, generateReply, enqueue, handleMessage, IS_VERCEL, webhookSecret, setupWebhook, webhookStatus } from "./bot.js";
@@ -80,10 +79,13 @@ function checkAuth(req) {
   return safeEqual(pass, config.panelPassword);
 }
 
+// Vercel fayllarni to'g'ri ko'chirishi uchun yo'llar statik (new URL(..., import.meta.url)) yozilgan
+const PANEL_HTML = new URL("../panel/index.html", import.meta.url);
+const FORMAT_JS = new URL("./format.js", import.meta.url);
 const STATIC = {
-  "/": { file: "public/index.html", type: "text/html; charset=utf-8" },
-  "/index.html": { file: "public/index.html", type: "text/html; charset=utf-8" },
-  "/lib/format.js": { file: "src/format.js", type: "text/javascript; charset=utf-8" },
+  "/": { file: PANEL_HTML, type: "text/html; charset=utf-8" },
+  "/index.html": { file: PANEL_HTML, type: "text/html; charset=utf-8" },
+  "/lib/format.js": { file: FORMAT_JS, type: "text/javascript; charset=utf-8" },
 };
 
 // ---------- SSE (faqat lokal rejimda) ----------
@@ -121,7 +123,7 @@ async function route(req, res) {
 
   if (req.method === "GET" && STATIC[p]) {
     const { file, type } = STATIC[p];
-    return send(res, 200, fs.readFileSync(path.join(ROOT, file)), { "content-type": type });
+    return send(res, 200, fs.readFileSync(file), { "content-type": type });
   }
 
   if (!p.startsWith("/api/")) return send(res, 404, { error: "Topilmadi" });
