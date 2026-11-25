@@ -55,11 +55,44 @@ export function ownerHintFor(err) {
  * @param {{ persona: string, history: {role:string, content:string}[] }} p
  * @returns {Promise<{ text: string, usage: {promptTokens:number, completionTokens:number}, model: string }>}
  */
-export async function askDodie({ persona, history }) {
+let activeModel = config.aiModel;
+
+/** Model topilmasa (eskirgan bo'lsa), provayderning ro'yxatidan mos chat modelini tanlaydi. */
+async function pickAvailableModel() {
+  const res = await fetch(`${config.aiBaseUrl}/models`, {
+    headers: { authorization: `Bearer ${config.aiKey}` },
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!res.ok) return null;
+  const data = await res.json().catch(() => null);
+  const ids = (data?.data ?? []).map((m) => String(m.id).replace(/^models\//, ""));
+  const bad = /(image|tts|audio|live|embed|vision|preview-tts|robotics|computer|lite)/i;
+  const prefs = config.aiProvider === "gemini" ? [/^gemini-flash-latest$/, /^gemini-[\d.]+-flash$/, /flash/] : [/./];
+  for (const re of prefs) {
+    const hit = ids.filter((id) => re.test(id) && !bad.test(id)).sort().reverse()[0];
+    if (hit) return hit;
+  }
+  return null;
+}
+
+export async function askDodie(args) {
   if (!config.aiKey) throw new AiError("no_key", "AI_API_KEY berilmagan");
+  try {
+    return await callModel(activeModel, args);
+  } catch (err) {
+    if (err.kind !== "model") throw err;
+    const alt = await pickAvailableModel().catch(() => null);
+    if (!alt || alt === activeModel) throw err;
+    console.warn(`[ai] "${activeModel}" topilmadi — "${alt}" ishlatiladi`);
+    activeModel = alt;
+    return callModel(activeModel, args);
+  }
+}
+
+async function callModel(model, { persona, history }) {
 
   const body = {
-    model: config.aiModel,
+    model,
     messages: [{ role: "system", content: `${persona}\n\n${FORMAT_RULES}\n${todayLine()}` }, ...history],
     max_tokens: 8192,
     temperature: 0.7,
@@ -113,7 +146,7 @@ export async function askDodie({ persona, history }) {
 
   return {
     text,
-    model: data.model ?? config.aiModel,
+    model: data.model ?? model,
     usage: {
       promptTokens: data.usage?.prompt_tokens ?? 0,
       completionTokens: data.usage?.completion_tokens ?? 0,

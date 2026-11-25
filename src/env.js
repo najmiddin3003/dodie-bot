@@ -19,7 +19,7 @@ export const PROVIDERS = {
   gemini: {
     label: "Google Gemini",
     baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
-    model: "gemini-2.5-flash",
+    model: "gemini-flash-latest",
     keyUrl: "https://aistudio.google.com/apikey",
   },
   groq: {
