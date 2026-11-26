@@ -50,6 +50,7 @@ if (!PROVIDERS[providerName]) {
 
 export const config = {
   telegramToken: env("TELEGRAM_BOT_TOKEN"),
+  forcePolling: ["1", "true", "yes"].includes(env("FORCE_POLLING").toLowerCase()),
   telegramApi: env("TELEGRAM_API_URL", "https://api.telegram.org").replace(/\/+$/, ""),
 
   aiProvider: PROVIDERS[providerName] ? providerName : "gemini",

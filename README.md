@@ -31,10 +31,13 @@ Vercel'da bot webhook orqali ishlaydi: Telegram har bir xabarni `/api/telegram` 
 2. **Storage → Upstash (Redis)** ni qo'shing (bepul) — suhbat xotirasi va panel shunda ishlaydi.
    U `KV_REST_API_URL` va `KV_REST_API_TOKEN` ni o'zi qo'shadi.
 3. **Redeploy** qiling, saytni oching (login: istalgan, parol: `PANEL_PASSWORD`).
-4. Panelda **«Webhookni ulash»** tugmasini bosing — tayyor.
+4. Tayyor — webhook **o'zi ulanadi** va uzilsa o'zi qayta ulanadi:
+   har bir deploy'dan keyingi birinchi so'rovda, panel ochilganda va har kuni Vercel Cron (`/api/cron`) orqali.
+   (Ixtiyoriy: `CRON_SECRET` qo'shsangiz, cron endpoint'i himoyalanadi.)
 
-⚠️ Bir vaqtda faqat bitta joy ishlaydi: kompyuterda `npm start` qilsangiz, Vercel webhook'i uziladi.
-Keyin Vercel'ga qaytish uchun panelda yana «Webhookni ulash» ni bosing.
+ℹ️ Vercel webhook ulangan bo'lsa, kompyuterdagi `npm start` uni **o'chirmaydi** (polling ishga tushmaydi).
+Kompyuterda majburan ishlatish kerak bo'lsa, `.env` ga `FORCE_POLLING=1` yozing — keyin Vercel webhook'i
+keyingi tekshiruvda o'zi qayta ulanadi.
 
 ## Bot buyruqlari
 - `/start`, `/help` — salomlashish va yordam

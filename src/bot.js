@@ -15,7 +15,7 @@ export const webhookSecret = config.telegramToken
 
 // Lokal rejim holati (Vercel'da getWebhookInfo ishlatiladi)
 export const botStatus = {
-  state: "starting", // starting | online | offline | no_token | bad_token | conflict
+  state: "starting", // starting | online | offline | no_token | bad_token | conflict | webhook_active
   username: null,
   name: null,
   error: null,
@@ -204,22 +204,43 @@ const COMMANDS = [
 ];
 
 export async function setupWebhook(publicUrl) {
-  const url = `${publicUrl.replace(/\/+$/, "")}/api/telegram`;
+  const url = hookUrl(publicUrl);
   await tg("setWebhook", { url, secret_token: webhookSecret, allowed_updates: ["message"], drop_pending_updates: false });
   await tg("setMyCommands", { commands: COMMANDS }).catch(() => {});
   return url;
 }
 
-/** Vercel rejimidagi holat (panel uchun). */
+const hookUrl = (publicUrl) => `${publicUrl.replace(/\/+$/, "")}/api/telegram`;
+
+/**
+ * Webhook doim ulangan bo'lishini ta'minlaydi: manzil noto'g'ri, yo'q yoki Telegram
+ * maxfiy kalit/manzil xatosini (401/403/404) qaytarayotgan bo'lsa — qayta ulaydi.
+ * Panel ochilganda, har bir yangi Vercel nusxasida va kunlik cron'da chaqiriladi.
+ */
+export async function ensureWebhook(publicUrl) {
+  if (!config.telegramToken || !publicUrl) return null;
+  const expected = hookUrl(publicUrl);
+  let info = await tg("getWebhookInfo");
+  const recentErr = info.last_error_date && Date.now() / 1000 - info.last_error_date < 3600 ? info.last_error_message : "";
+  const authErr = /\b(401|403|404)\b/.test(recentErr ?? "");
+  if (info.url !== expected || authErr) {
+    console.log(`[webhook] qayta ulanmoqda: ${info.url || "(yo'q)"} -> ${expected}`);
+    await setupWebhook(publicUrl);
+    info = await tg("getWebhookInfo");
+    info.reconnected = true;
+  }
+  return info;
+}
+
+/** Vercel rejimidagi holat (panel uchun). Webhook uzilgan bo'lsa, o'zi qayta ulaydi. */
 export async function webhookStatus(publicUrl) {
   if (!config.telegramToken) return { state: "no_token", error: "Vercel sozlamalarida TELEGRAM_BOT_TOKEN yo'q" };
   try {
     const me = await tg("getMe");
-    const info = await tg("getWebhookInfo");
-    const expected = publicUrl ? `${publicUrl.replace(/\/+$/, "")}/api/telegram` : null;
-    // Manzil domeni farq qilishi mumkin (vercel.app / o'z domeni) — yo'l to'g'ri bo'lsa yetarli
-    const connected = Boolean(info.url) && (info.url === expected || info.url.endsWith("/api/telegram"));
-    const lastErr = info.last_error_date && Date.now() / 1000 - info.last_error_date < 3600 ? info.last_error_message : null;
+    const info = (await ensureWebhook(publicUrl)) ?? (await tg("getWebhookInfo"));
+    const connected = Boolean(info.url) && info.url.endsWith("/api/telegram");
+    const lastErr =
+      !info.reconnected && info.last_error_date && Date.now() / 1000 - info.last_error_date < 3600 ? info.last_error_message : null;
     return {
       state: connected ? (lastErr ? "offline" : "online") : "no_webhook",
       username: me.username,
@@ -259,7 +280,17 @@ export async function startPolling() {
     }
   }
 
-  // Avval Vercel'da webhook ulangan bo'lsa, long polling ishlamaydi — o'chiramiz.
+  // Vercel'da webhook ulangan bo'lsa, uni o'chirmaymiz (aks holda Vercel'dagi bot uziladi).
+  // Kompyuterda majburan ishlatish kerak bo'lsa: .env da FORCE_POLLING=1.
+  const hook = await tg("getWebhookInfo").catch(() => null);
+  if (hook?.url && !config.forcePolling) {
+    setStatus({
+      state: "webhook_active",
+      error: `Bot Vercel'da ishlayapti (${hook.url}). Webhook uzilmasligi uchun kompyuterda polling ishga tushirilmadi. Kompyuterda ishlatish kerak bo'lsa, .env ga FORCE_POLLING=1 yozing.`,
+    });
+    console.warn("[bot] Vercel webhook ulangan — lokal polling o'tkazib yuborildi (FORCE_POLLING=1 bilan majburlash mumkin).");
+    return;
+  }
   await tg("deleteWebhook").catch(() => {});
   await tg("setMyCommands", { commands: COMMANDS }).catch(() => {});
 

@@ -223,6 +223,7 @@ async function api(path, body) {
 const STATUS = {
   online: ["ok", "Onlayn"], starting: ["", "Ishga tushmoqda…"], offline: ["warn", "Ulanish yo'q"],
   no_token: ["bad", "Token yo'q"], no_webhook: ["warn", "Webhook ulanmagan"], bad_token: ["bad", "Token noto'g'ri"], conflict: ["warn", "Ikki nusxa ishlayapti"],
+  webhook_active: ["warn", "Vercel'da ishlayapti"],
 };
 
 function renderStatus() {

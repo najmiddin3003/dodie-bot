@@ -5,7 +5,7 @@ import { config } from "./env.js";
 import * as store from "./store.js";
 import { FORMAT_LIB_SOURCE } from "./format.js";
 import { kv, kvKind } from "./kv.js";
-import { botStatus, generateReply, enqueue, handleMessage, IS_VERCEL, webhookSecret, setupWebhook, webhookStatus } from "./bot.js";
+import { botStatus, generateReply, enqueue, handleMessage, IS_VERCEL, webhookSecret, setupWebhook, webhookStatus, ensureWebhook } from "./bot.js";
 
 const PANEL_CHAT = "panel";
 
@@ -102,6 +102,7 @@ if (!IS_VERCEL) {
 }
 
 // ---------- marshrutlar ----------
+let webhookChecked = null;
 async function route(req, res) {
   const url = new URL(req.url, "http://localhost");
   // Vercel rewrite asl yo'lni ?__path= orqali uzatadi (vercel.json)
@@ -119,6 +120,25 @@ async function route(req, res) {
       await handleMessage(update.message).catch((err) => console.error("[webhook] xato:", err.message));
     }
     return send(res, 200, { ok: true });
+  }
+
+  // Kunlik Vercel Cron (vercel.json): webhook uzilib qolgan bo'lsa qayta ulaydi
+  if (p === "/api/cron") {
+    if (process.env.CRON_SECRET && !safeEqual(req.headers.authorization ?? "", `Bearer ${process.env.CRON_SECRET}`)) {
+      return send(res, 401, { error: "Ruxsat yo'q" });
+    }
+    if (!IS_VERCEL) return send(res, 200, { ok: true, skipped: "local" });
+    const info = await ensureWebhook(publicUrl(req));
+    return send(res, 200, { ok: true, url: info?.url ?? null, reconnected: Boolean(info?.reconnected) });
+  }
+
+  // Har bir yangi Vercel nusxasi (deploy'dan keyin ham) birinchi so'rovda webhookni tekshiradi
+  if (IS_VERCEL && !webhookChecked) {
+    webhookChecked = ensureWebhook(publicUrl(req)).catch((err) => {
+      webhookChecked = null;
+      console.error("[webhook] tekshiruv xatosi:", err.message);
+    });
+    await webhookChecked;
   }
 
   if (req.method === "GET" && STATIC[p]) {
